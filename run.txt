@@ -1,0 +1,118 @@
+# ========================================
+# EFK + MySQL 慢查询智能分析系统 - 启动命令
+# ========================================
+
+# ==============================
+# 1. 创建网络
+# ==============================
+docker network create efk-net
+
+# ==============================
+# 2. MySQL 5.7
+# ==============================
+docker run -d \
+  --name mysql-5.7 \
+  --network efk-net \
+  --restart always \
+  -p 3306:3306 \
+  -e MYSQL_ROOT_PASSWORD=Abc@1234 \
+  -v /data/mysql-5.7/data:/var/lib/mysql \
+  -v /data/mysql-5.7/logs:/var/log/mysql \
+  -v /data/mysql-5.7/conf/my.cnf:/etc/mysql/conf.d/my.cnf \
+  mysql:5.7
+
+# ==============================
+# 3. Elasticsearch 8.13.0
+# ==============================
+docker run -d \
+  --name elasticsearch \
+  --network efk-net \
+  -p 9200:9200 \
+  -e discovery.type=single-node \
+  -e xpack.security.enabled=false \
+  -e ES_JAVA_OPTS=-Xms512m -Xmx512m \
+  -e cluster.name=efk-cluster \
+  elasticsearch:8.13.0
+
+# ==============================
+# 4. Kibana 8.13.0
+# ==============================
+docker run -d \
+  --name kibana \
+  --network efk-net \
+  -p 5601:5601 \
+  -e ELASTICSEARCH_HOSTS=http://elasticsearch:9200 \
+  kibana:8.13.0
+
+# ==============================
+# 5. Fluentd（需先构建镜像）
+#    cd /data/fluentd && docker build -t fluentd-custom:v1 .
+# ==============================
+docker run -d \
+  --name fluentd \
+  --network efk-net \
+  -p 24224:24224 \
+  -p 24224:24224/udp \
+  -p 24220:24220 \
+  -v /data/fluentd/conf/fluent.conf:/fluentd/etc/fluent.conf \
+  fluentd-custom:v1
+
+# ==============================
+# 6. Fluent Bit
+# ==============================
+docker run -d \
+  --name fluent-bit \
+  --network efk-net \
+  -v /data/fluent-bit/etc:/fluent-bit/etc \
+  -v /data/mysql-5.7/logs/slow.log:/var/log/mysql/slow.log \
+  cr.fluentbit.io/fluent/fluent-bit:3.0
+
+# ==============================
+# 7. 慢日志分析 API（Flask, port 5001）
+#    前置：pip install flask openai mysql-connector-python
+#    环境变量在 /data/mysql/.env 中配置
+# ==============================
+cd /data/mysql && export $(grep -v '^#' .env | xargs) && \
+nohup python3 process_slow_log.py > /data/mysql/logs/flask_output.log 2>&1 &
+
+# ==============================
+# 8. 慢查询报告查看器（Streamlit, port 8501）
+#    前置：pip install streamlit
+# ==============================
+cd /data/mysql && \
+nohup python3 -m streamlit run show_slow_report.py \
+  --server.port 8501 \
+  --server.address 0.0.0.0 \
+  --server.headless true > /data/mysql/logs/streamlit_output.log 2>&1 &
+
+# ==============================
+# 环境变量配置（/data/mysql/.env）
+# ==============================
+# DEEPSEEK_API_KEY=your_deepseek_api_key
+# DB_HOST=127.0.0.1
+# DB_USER=root
+# DB_PASSWORD=your_password
+# DB_PORT=3306
+
+# ==============================
+# 访问地址汇总
+# ==============================
+# MySQL:          服务器IP:3306
+# Elasticsearch:  服务器IP:9200
+# Kibana:         服务器IP:5601
+# Fluentd:        服务器IP:24224
+# AI 分析 API:    服务器IP:5001
+# 报告查看器:     服务器IP:8501
+
+# ==============================
+# Python 依赖安装
+# ==============================
+# pip install flask openai mysql-connector-python streamlit
+
+# ==============================
+# Kibana 配置
+# ==============================
+# 1. 访问 http://服务器IP:5601
+# 2. Management > Stack Management > Index Patterns
+# 3. 创建索引模式：fluentd-mysql.slow*
+# 4. Discover 页面查看慢查询日志
